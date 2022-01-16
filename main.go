@@ -3,8 +3,11 @@ package main
 import (
 	"context"
 	"fmt"
-	"math/big"
 	"os"
+	"os/signal"
+	"sync"
+	"syscall"
+	"time"
 
 	"github.com/cryptoriums/packages/ethereum"
 	"github.com/cryptoriums/packages/logging"
@@ -41,9 +44,6 @@ import (
 			.....
 		}
 	}
-	__________
-
-	The only variable is `earmarkIncentive` so we can calculate the incentive as is using the formula above.
 */
 
 const BoosterContractAddress = "0xf403c135812408bfbe8713b5a23a04b3d48aae31"
@@ -74,13 +74,11 @@ func main() {
 	if err != nil {
 		exitWithError(logger, err)
 	}
-	logger.Log("Fee Denominator: ", feeDenominator)
 
 	earmarkIncentive, err := booster.EarmarkIncentive(&bind.CallOpts{Context: ctx})
 	if err != nil {
 		exitWithError(logger, err)
 	}
-	logger.Log("Earmark Incentive: ", earmarkIncentive)
 
 	crvAddr, err := booster.Crv(&bind.CallOpts{Context: ctx})
 	if err != nil {
@@ -88,18 +86,43 @@ func main() {
 	}
 	logger.Log("CRV Address: ", crvAddr)
 
-	// Original code:
-	// uint256 crvBal = IERC20(crv).balanceOf(address(this));
-	//
-	// so we can assume a value as current balance
-	// because crvBal is balance of the wallet which connected to the contract.
-	balance := big.NewInt(337)
-	logger.Log("CRV Balance: ", balance)
+	done := false
+	intChan := make(chan os.Signal)
+	signal.Notify(intChan, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-intChan
+		done = true
+	}()
 
-	callIncentive := balance.Mul(balance, earmarkIncentive)
-	callIncentive = callIncentive.Div(callIncentive, feeDenominator)
+	wg := &sync.WaitGroup{}
+	wg.Add(1)
 
-	fmt.Println("Call Incentive: ", callIncentive)
+	go func() {
+		for {
+			crvBalance, err := client.BalanceAt(ctx, crvAddr, nil)
+			if err != nil {
+				exitWithError(logger, err)
+			}
+
+			callIncentive := crvBalance.Mul(crvBalance, earmarkIncentive)
+			callIncentive = callIncentive.Div(callIncentive, feeDenominator)
+
+			fmt.Println()
+			fmt.Println("Fee Denominator: ", feeDenominator)
+			fmt.Println("Earmark Incentive: ", earmarkIncentive)
+			fmt.Println("CRV Balance: ", crvBalance)
+			fmt.Println("Call Incentive is ", callIncentive)
+
+			if done {
+				wg.Done()
+				break
+			}
+			time.Sleep(time.Second)
+		}
+	}()
+
+	wg.Wait()
+	fmt.Println("Stopped")
 }
 
 func exitWithError(logger log.Logger, err error) {
